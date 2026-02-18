@@ -42,8 +42,9 @@ export default function (pi: ExtensionAPI) {
     worktreeRoot = execSync("git rev-parse --show-toplevel", {
       stdio: ["pipe", "pipe", "pipe"],
     }).toString().trim();
-  } catch {
-    // Not in a git repo
+    console.error(`[convos] worktreeRoot resolved to: ${worktreeRoot}`);
+  } catch (e) {
+    console.error(`[convos] Failed to resolve worktreeRoot: ${e}`);
   }
 
   function getConvosConfigPath(): string | null {
@@ -64,10 +65,16 @@ export default function (pi: ExtensionAPI) {
 
   function persistConversation(convId: string, invite: string | null) {
     const configPath = getConvosConfigPath();
+    console.error(`[convos] persistConversation: configPath=${configPath}, worktreeRoot=${worktreeRoot}`);
     if (!configPath) return;
-    const dir = configPath.replace(/\/[^/]+$/, "");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ conversationId: convId, inviteUrl: invite }, null, 2) + "\n");
+    try {
+      const dir = configPath.replace(/\/[^/]+$/, "");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(configPath, JSON.stringify({ conversationId: convId, inviteUrl: invite }, null, 2) + "\n");
+      console.error(`[convos] Persisted conversation to ${configPath}`);
+    } catch (e) {
+      console.error(`[convos] Failed to persist: ${e}`);
+    }
   }
 
   // Track when a convos message triggers a turn vs terminal input
