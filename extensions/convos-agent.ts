@@ -20,7 +20,9 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -71,9 +73,7 @@ export default function (pi: ExtensionAPI) {
                 `Convos agent is ready and listening for messages.`,
                 `Conversation: ${conversationId}`,
                 `Invite URL: ${inviteUrl}`,
-                `QR code: ${qrCodePath}`,
                 ``,
-                `Use the read tool on the QR code path to display it inline for the user.`,
                 `Use convos_send to reply to messages. Use convos_react to react.`,
               ].join("\n"),
               display: true,
@@ -132,15 +132,49 @@ export default function (pi: ExtensionAPI) {
       }
     });
 
-    // Silently consume stderr (QR code path + diagnostics)
+    // Capture stderr for diagnostics/errors
+    const stderrLines: string[] = [];
     if (proc.stderr) {
-      createInterface({ input: proc.stderr, terminal: false }).on("line", () => {});
+      createInterface({ input: proc.stderr, terminal: false }).on("line", (line: string) => {
+        stderrLines.push(line);
+        // Keep only last 50 lines
+        if (stderrLines.length > 50) stderrLines.shift();
+      });
     }
 
     proc.on("exit", (code) => {
+      const wasReady = isReady;
       isReady = false;
       agentProcess = null;
       stdinWriter = null;
+      rl?.close();
+      rl = null;
+
+      if (!wasReady && code !== 0) {
+        // Process died before becoming ready — likely an error
+        const errorDetail = stderrLines.length > 0
+          ? `\nStderr:\n${stderrLines.join("\n")}`
+          : "";
+        pi.sendMessage(
+          {
+            customType: "convos",
+            content: `[Convos] Agent process exited with code ${code} before becoming ready.${errorDetail}`,
+            display: true,
+            details: { type: "error", code, stderr: stderrLines },
+          },
+          { triggerTurn: false },
+        );
+      } else if (wasReady) {
+        pi.sendMessage(
+          {
+            customType: "convos",
+            content: `[Convos] Agent process exited (code ${code}).`,
+            display: true,
+            details: { type: "exit", code },
+          },
+          { triggerTurn: false },
+        );
+      }
     });
   }
 
@@ -221,6 +255,33 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text: `Reacted with ${params.emoji} to message ${params.messageId}` }],
       };
     },
+  });
+
+  // --- Message Renderer ---
+
+  pi.registerMessageRenderer("convos", (message, _options, theme) => {
+    const details = message.details as any;
+    let output = "";
+
+    if (details?.type === "ready" && details.qrCodePath) {
+      // Render QR code image inline using iTerm2 inline image protocol
+      try {
+        const imageData = readFileSync(details.qrCodePath);
+        const base64 = imageData.toString("base64");
+        const filename = Buffer.from(details.qrCodePath).toString("base64");
+        output += `\x1b]1337;File=name=${filename};inline=1;width=auto;preserveAspectRatio=1:${base64}\x07\n\n`;
+      } catch {
+        // Fall back to showing the path if we can't read the image
+        output += theme.fg("dim", `QR code: ${details.qrCodePath}`) + "\n\n";
+      }
+      output += theme.fg("accent", "Convos agent is ready") + "\n";
+      output += theme.fg("dim", `Conversation: `) + details.conversationId + "\n";
+      output += theme.fg("dim", `Invite URL: `) + details.inviteUrl;
+    } else {
+      output = message.content;
+    }
+
+    return new Text(output, 0, 0);
   });
 
   // --- Commands ---
