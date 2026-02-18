@@ -36,26 +36,23 @@ export default function (pi: ExtensionAPI) {
   let isReady = false;
   let lastMessageFromConvos = false;
 
-  async function getWorktreeRoot(): Promise<string | null> {
-    try {
-      const result = await pi.exec("git", ["rev-parse", "--show-toplevel"]);
-      if (result.code === 0 && result.stdout.trim()) {
-        return result.stdout.trim();
-      }
-      return null;
-    } catch {
-      return null;
-    }
+  // Resolve worktree root eagerly at load time
+  let worktreeRoot: string | null = null;
+  try {
+    worktreeRoot = execSync("git rev-parse --show-toplevel", {
+      stdio: ["pipe", "pipe", "pipe"],
+    }).toString().trim();
+  } catch {
+    // Not in a git repo
   }
 
-  async function getConvosConfigPath(): Promise<string | null> {
-    const root = await getWorktreeRoot();
-    if (!root) return null;
-    return join(root, ".pi", "convos.json");
+  function getConvosConfigPath(): string | null {
+    if (!worktreeRoot) return null;
+    return join(worktreeRoot, ".pi", "convos.json");
   }
 
-  async function loadPersistedConversation(): Promise<string | null> {
-    const configPath = await getConvosConfigPath();
+  function loadPersistedConversation(): string | null {
+    const configPath = getConvosConfigPath();
     if (!configPath || !existsSync(configPath)) return null;
     try {
       const data = JSON.parse(readFileSync(configPath, "utf-8"));
@@ -65,8 +62,8 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function persistConversation(convId: string, invite: string | null) {
-    const configPath = await getConvosConfigPath();
+  function persistConversation(convId: string, invite: string | null) {
+    const configPath = getConvosConfigPath();
     if (!configPath) return;
     const dir = configPath.replace(/\/[^/]+$/, "");
     mkdirSync(dir, { recursive: true });
@@ -114,7 +111,7 @@ export default function (pi: ExtensionAPI) {
     // Read stdout line by line for ndjson events
     rl = createInterface({ input: proc.stdout!, terminal: false });
 
-    rl.on("line", async (line: string) => {
+    rl.on("line", (line: string) => {
       let event: any;
       try {
         event = JSON.parse(line);
@@ -128,7 +125,7 @@ export default function (pi: ExtensionAPI) {
           conversationId = event.conversationId;
           qrCodePath = event.qrCodePath;
           inviteUrl = event.inviteUrl;
-          await persistConversation(event.conversationId, event.inviteUrl);
+          persistConversation(event.conversationId, event.inviteUrl);
           pi.sendMessage(
             {
               customType: "convos",
@@ -377,7 +374,7 @@ export default function (pi: ExtensionAPI) {
 
       // If no conversation ID provided as argument, try to reuse persisted one
       const hasConversationArg = argList.some((a) => !a.startsWith("-"));
-      const persistedId = await loadPersistedConversation();
+      const persistedId = loadPersistedConversation();
 
       if (!hasConversationArg && persistedId) {
         // Attach to existing conversation
