@@ -1,0 +1,17 @@
+{
+  "name": "pi-convos",
+  "version": "0.1.0",
+  "description": "Pi extension for Convos — ephemeral messaging for AI agents built on XMTP",
+  "keywords": ["pi-package", "convos", "xmtp", "messaging", "agent"],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
