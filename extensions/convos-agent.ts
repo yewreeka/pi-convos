@@ -62,6 +62,35 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function getDefaultConversationName(): string {
+    // Get project name from directory
+    const projectName = worktreeRoot ? worktreeRoot.split("/").pop() ?? "project" : "project";
+
+    // Get branch name
+    let branch: string | null = null;
+    try {
+      branch = execSync("git rev-parse --abbrev-ref HEAD", {
+        stdio: ["pipe", "pipe", "pipe"],
+      }).toString().trim();
+    } catch {
+      // Not in a git repo or no branch
+    }
+
+    // If on a non-default branch, summarize it
+    if (branch && branch !== "main" && branch !== "master" && branch !== "HEAD") {
+      // Convert branch name like "feature/add-auth-system" to "add auth"
+      const summary = branch
+        .replace(/^(feature|fix|bugfix|hotfix|chore|refactor|docs)\//i, "")
+        .replace(/[-_/]/g, " ")
+        .split(" ")
+        .slice(0, 2)
+        .join(" ");
+      return `${projectName} — ${summary}`;
+    }
+
+    return projectName;
+  }
+
   function persistConversation(convId: string, invite: string | null) {
     const configPath = getConvosConfigPath();
     if (!configPath) return;
@@ -381,9 +410,10 @@ export default function (pi: ExtensionAPI) {
         argList.unshift(persistedId);
         ctx.ui.notify(`Resuming conversation ${persistedId}...`, "info");
       } else if (!hasConversationArg) {
-        // New conversation with defaults
-        argList.push("--name", "Chat with Agent", "--profile-name", "🤖 Agent");
-        ctx.ui.notify("Starting new Convos conversation...", "info");
+        // New conversation — derive name from project and branch
+        const convName = getDefaultConversationName();
+        argList.push("--name", convName, "--profile-name", "🤖 Agent");
+        ctx.ui.notify(`Starting new Convos conversation: ${convName}...`, "info");
       } else {
         ctx.ui.notify("Starting Convos agent...", "info");
       }
