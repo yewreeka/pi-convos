@@ -13,7 +13,7 @@ Gives your pi agent a real-time messaging channel. Users scan a QR code to join,
 - **`convos_send` tool** — The LLM replies by calling a tool (text or reply-to)
 - **`convos_react` tool** — The LLM reacts to messages with emoji
 - **Join requests auto-processed** — New members are added automatically in the background
-- **Includes the convos-cli skill** — The agent knows how to use all Convos CLI commands
+- **Conversation persistence** — Conversations are saved per git worktree and resumed automatically
 
 ## Requirements
 
@@ -28,27 +28,30 @@ convos init
 ## Install
 
 ```bash
-pi install /path/to/pi-convos
+# From git
+pi install git:github.com/yewreeka/pi-convos
 
-# or from git (once published)
-# pi install git:github.com/xmtplabs/pi-convos
+# Or from a local path (for development)
+pi install /path/to/pi-convos
 ```
+
+> **Note:** Only install from one source. If you switch between git and local, remove the old one first with `pi remove`.
 
 ## Usage
 
 Start pi, then:
 
 ```
-/convos-start --name "My Bot" --profile-name "🤖 Assistant"
+/convos-start
 ```
 
 The agent will:
-1. Create a new Convos conversation
-2. Generate a QR code PNG and tell you the path
-3. Show the QR code inline (use `read` on the path)
-4. Listen for messages in the background
+1. Create a new Convos conversation (named after your project + branch)
+2. Show a QR code invite inline
+3. Listen for messages in the background
+4. Resume the same conversation next time you start pi in this worktree
 
-When someone joins and sends a message, the agent gets interrupted and can respond naturally.
+When someone joins and sends a message, the agent gets interrupted and can respond naturally. Terminal messages get terminal responses, Convos messages get Convos responses.
 
 ### Commands
 
