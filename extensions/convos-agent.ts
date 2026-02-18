@@ -412,7 +412,7 @@ export default function (pi: ExtensionAPI) {
       } else if (!hasConversationArg) {
         // New conversation — derive name from project and branch
         const convName = getDefaultConversationName();
-        argList.push("--name", convName, "--profile-name", "🤖 Agent");
+        argList.push("--name", convName, "--profile-name", "Pi");
         ctx.ui.notify(`Starting new Convos conversation: ${convName}...`, "info");
       } else {
         ctx.ui.notify("Starting Convos agent...", "info");
