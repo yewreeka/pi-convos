@@ -35,10 +35,19 @@ export default function (pi: ExtensionAPI) {
   let rl: Interface | null = null;
   let isReady = false;
   let lastMessageFromConvos = false;
+  let projectCwd: string | null = null;
+
+  pi.on("session_start", async (_event, ctx) => {
+    projectCwd = ctx.cwd;
+  });
 
   function getWorktreeRoot(): string | null {
+    if (!projectCwd) return null;
     try {
-      return execSync("git rev-parse --show-toplevel", { stdio: ["pipe", "pipe", "pipe"] })
+      return execSync("git rev-parse --show-toplevel", {
+        cwd: projectCwd,
+        stdio: ["pipe", "pipe", "pipe"],
+      })
         .toString()
         .trim();
     } catch {
