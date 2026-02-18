@@ -2,7 +2,7 @@
 
 A [pi](https://github.com/badlogic/pi-mono) package that connects AI agents to [Convos](https://convos.org) — privacy-focused ephemeral messaging built on [XMTP](https://xmtp.org).
 
-<video src="./assets/demo.mp4" autoplay loop muted playsinline width="600"></video>
+![Demo](./assets/demo.gif)
 
 ## What it does
 
