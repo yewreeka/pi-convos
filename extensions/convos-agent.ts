@@ -405,14 +405,23 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("convos-status", {
-    description: "Show Convos agent status",
+    description: "Show Convos agent status and QR code",
     handler: async (_args, ctx) => {
       if (!agentProcess || !isReady) {
         ctx.ui.notify("Convos agent is not running", "info");
       } else {
-        ctx.ui.notify(
-          `Convos agent running | Conversation: ${conversationId} | Invite: ${inviteUrl}`,
-          "info",
+        pi.sendMessage(
+          {
+            customType: "convos",
+            content: [
+              `Convos agent is running.`,
+              `Conversation: ${conversationId}`,
+              `Invite URL: ${inviteUrl}`,
+            ].join("\n"),
+            display: true,
+            details: { type: "ready", conversationId, inviteUrl, qrCodePath },
+          },
+          { triggerTurn: false },
         );
       }
     },
