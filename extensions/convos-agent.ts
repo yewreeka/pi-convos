@@ -20,7 +20,7 @@
 
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
@@ -175,6 +175,63 @@ export default function (pi: ExtensionAPI) {
         case "message":
 
           lastMessageFromConvos = true;
+
+          // Check if this is an attachment message
+          const attachMatch = event.content?.match(/^\[remote attachment: (.+?) \(.*?\) (https?:\/\/\S+)\]$/);
+          if (attachMatch && conversationId) {
+            // Download the attachment
+            const filename = attachMatch[1];
+            const isImage = /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(filename);
+
+            if (isImage) {
+              // Download to temp file
+              const tmpDir = join(worktreeRoot ?? "/tmp", ".pi");
+              mkdirSync(tmpDir, { recursive: true });
+              const outputPath = join(tmpDir, `convos-attachment-${event.id}-${filename}`);
+
+              try {
+                execSync(
+                  `convos conversation download-attachment ${conversationId} ${event.id} -o "${outputPath}"`,
+                  { stdio: ["pipe", "pipe", "pipe"], timeout: 30000 },
+                );
+
+                // Read image and encode as base64
+                const imageData = readFileSync(outputPath);
+                const base64 = imageData.toString("base64");
+                const ext = filename.split(".").pop()?.toLowerCase() ?? "jpeg";
+                const mediaType = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+
+                lastMessageFromConvos = true;
+                pi.sendUserMessage([
+                  { type: "text", text: `[Convos image from ${event.senderInboxId}] ${filename}` },
+                  { type: "image", source: { type: "base64", mediaType, data: base64 } },
+                ], { deliverAs: "steer" });
+
+                // Clean up temp file
+                try { unlinkSync(outputPath); } catch {}
+              } catch (e) {
+                // Download failed, send as text
+                pi.sendMessage(
+                  {
+                    customType: "convos",
+                    content: `[Convos message from ${event.senderInboxId}] Sent an image (${filename}) but download failed.`,
+                    display: true,
+                    details: {
+                      type: "message",
+                      id: event.id,
+                      senderInboxId: event.senderInboxId,
+                      contentType: event.contentType,
+                      content: event.content,
+                      sentAt: event.sentAt,
+                    },
+                  },
+                  { triggerTurn: true, deliverAs: "steer" },
+                );
+              }
+              break;
+            }
+          }
+
           pi.sendMessage(
             {
               customType: "convos",
