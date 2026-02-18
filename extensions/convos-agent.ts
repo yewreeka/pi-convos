@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
                 `Conversation: ${conversationId}`,
                 `Invite URL: ${inviteUrl}`,
                 ``,
-                `Use convos_send to reply to messages. Use convos_react to react.`,
+                `IMPORTANT: Only use convos_send/convos_react to reply to messages from Convos (prefixed with "[Convos message from ...]"). For messages from the terminal, respond normally as plain text without using convos tools.`,
               ].join("\n"),
               display: true,
               details: { type: "ready", conversationId, inviteUrl, qrCodePath },
@@ -199,7 +199,7 @@ export default function (pi: ExtensionAPI) {
     name: "convos_send",
     label: "Convos Send",
     description:
-      "Send a message to the active Convos conversation. Use this to reply to messages received from Convos users.",
+      "Send a message to the active Convos conversation. ONLY use this to reply to messages from Convos users (messages prefixed with '[Convos message from ...]'). Do NOT use this for responding to terminal/user messages — respond to those normally as plain text. IMPORTANT: Convos does not render markdown. Never use markdown formatting like **bold**, *italic*, # headings, `code`, [links](url), or bullet lists with - or *. Write naturally in plain text.",
     parameters: Type.Object({
       text: Type.String({ description: "The message text to send" }),
       replyTo: Type.Optional(

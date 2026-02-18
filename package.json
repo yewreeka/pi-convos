@@ -6,8 +6,7 @@
   "license": "MIT",
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": ["./extensions"]
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
