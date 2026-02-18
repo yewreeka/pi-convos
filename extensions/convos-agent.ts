@@ -18,9 +18,10 @@
  * Requires @convos/cli to be installed: npm install -g @convos/cli
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -34,6 +35,41 @@ export default function (pi: ExtensionAPI) {
   let rl: Interface | null = null;
   let isReady = false;
   let lastMessageFromConvos = false;
+
+  function getWorktreeRoot(): string | null {
+    try {
+      return execSync("git rev-parse --show-toplevel", { stdio: ["pipe", "pipe", "pipe"] })
+        .toString()
+        .trim();
+    } catch {
+      return null;
+    }
+  }
+
+  function getConvosConfigPath(): string | null {
+    const root = getWorktreeRoot();
+    if (!root) return null;
+    return join(root, ".pi", "convos.json");
+  }
+
+  function loadPersistedConversation(): string | null {
+    const configPath = getConvosConfigPath();
+    if (!configPath || !existsSync(configPath)) return null;
+    try {
+      const data = JSON.parse(readFileSync(configPath, "utf-8"));
+      return data.conversationId ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistConversation(convId: string, invite: string | null) {
+    const configPath = getConvosConfigPath();
+    if (!configPath) return;
+    const dir = configPath.replace(/\/[^/]+$/, "");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(configPath, JSON.stringify({ conversationId: convId, inviteUrl: invite }, null, 2) + "\n");
+  }
 
   // Track when a convos message triggers a turn vs terminal input
   pi.on("input", async (event) => {
@@ -90,6 +126,7 @@ export default function (pi: ExtensionAPI) {
           conversationId = event.conversationId;
           qrCodePath = event.qrCodePath;
           inviteUrl = event.inviteUrl;
+          persistConversation(event.conversationId, event.inviteUrl);
           pi.sendMessage(
             {
               customType: "convos",
@@ -334,9 +371,25 @@ export default function (pi: ExtensionAPI) {
 
       const argList = args
         ? args.match(/"[^"]*"|\S+/g)?.map((a) => a.replace(/^"|"$/g, "")) ?? []
-        : ["--name", "Chat with Agent", "--profile-name", "🤖 Agent"];
+        : [];
+
+      // If no conversation ID provided as argument, try to reuse persisted one
+      const hasConversationArg = argList.some((a) => !a.startsWith("-"));
+      const persistedId = loadPersistedConversation();
+
+      if (!hasConversationArg && persistedId) {
+        // Attach to existing conversation
+        argList.unshift(persistedId);
+        ctx.ui.notify(`Resuming conversation ${persistedId}...`, "info");
+      } else if (!hasConversationArg) {
+        // New conversation with defaults
+        argList.push("--name", "Chat with Agent", "--profile-name", "🤖 Agent");
+        ctx.ui.notify("Starting new Convos conversation...", "info");
+      } else {
+        ctx.ui.notify("Starting Convos agent...", "info");
+      }
+
       startAgent(argList);
-      ctx.ui.notify("Starting Convos agent...", "info");
     },
   });
 
