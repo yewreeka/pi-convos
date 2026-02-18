@@ -173,6 +173,8 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "message":
+          // Debug: log raw event to see attachment structure
+          console.error(`[convos] raw message event: ${JSON.stringify(event)}`);
           lastMessageFromConvos = true;
           pi.sendMessage(
             {
