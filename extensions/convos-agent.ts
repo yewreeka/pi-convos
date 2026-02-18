@@ -33,6 +33,30 @@ export default function (pi: ExtensionAPI) {
   let inviteUrl: string | null = null;
   let rl: Interface | null = null;
   let isReady = false;
+  let lastMessageFromConvos = false;
+
+  // Track when a convos message triggers a turn vs terminal input
+  pi.on("input", async (event) => {
+    if (event.source === "interactive") {
+      lastMessageFromConvos = false;
+    }
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    if (!isReady) return;
+
+    if (lastMessageFromConvos) {
+      return {
+        systemPrompt: event.systemPrompt +
+          "\n\nThe current message is from a Convos user. Reply using the convos_send tool. Do NOT use markdown — Convos renders plain text only.",
+      };
+    } else {
+      return {
+        systemPrompt: event.systemPrompt +
+          "\n\nThe current message is from the terminal. Respond normally as plain text output. Do NOT use convos_send or convos_react — those are only for Convos messages.",
+      };
+    }
+  });
 
   function startAgent(args: string[]) {
     // Use globally installed convos CLI
@@ -84,6 +108,7 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "message":
+          lastMessageFromConvos = true;
           pi.sendMessage(
             {
               customType: "convos",
@@ -199,7 +224,7 @@ export default function (pi: ExtensionAPI) {
     name: "convos_send",
     label: "Convos Send",
     description:
-      "Send a message to the active Convos conversation. ONLY use this to reply to messages from Convos users (messages prefixed with '[Convos message from ...]'). Do NOT use this for responding to terminal/user messages — respond to those normally as plain text. IMPORTANT: Convos does not render markdown. Never use markdown formatting like **bold**, *italic*, # headings, `code`, [links](url), or bullet lists with - or *. Write naturally in plain text.",
+      "Send a message to the active Convos conversation. Only use when the system prompt says the current message is from Convos. Never use markdown — Convos renders plain text only.",
     parameters: Type.Object({
       text: Type.String({ description: "The message text to send" }),
       replyTo: Type.Optional(
