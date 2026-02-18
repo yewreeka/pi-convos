@@ -2,6 +2,8 @@
 
 A [pi](https://github.com/badlogic/pi-mono) package that connects AI agents to [Convos](https://convos.org) — privacy-focused ephemeral messaging built on [XMTP](https://xmtp.org).
 
+<video src="./assets/demo.mp4" autoplay loop muted playsinline width="600"></video>
+
 ## What it does
 
 Gives your pi agent a real-time messaging channel. Users scan a QR code to join, and messages flow directly into the agent's conversation loop — no polling required.
