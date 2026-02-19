@@ -10,7 +10,16 @@
  * - Registers `convos_send` and `convos_react` tools for the LLM to reply
  * - Messages from Convos users interrupt the agent as new turns
  *
- * Commands:
+ * Modes:
+ *   Interactive (TUI) — user starts with /convos-start command
+ *   Headless — auto-starts on session_start when no UI is available
+ *
+ * Headless mode is configured via environment variables:
+ *   CONVOS_ENV_FILE     — Path to .env file for convos CLI (auto-created if missing)
+ *   CONVOS_NAME         — Conversation name (default: derived from project/branch)
+ *   CONVOS_PROFILE_NAME — Profile name shown to other members (default: "Pi")
+ *
+ * Commands (interactive only):
  *   /convos-start [args]  — Start the agent (args passed to `convos agent serve`)
  *   /convos-stop          — Stop the agent
  *   /convos-status        — Show agent status
@@ -21,7 +30,7 @@
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -35,6 +44,11 @@ export default function (pi: ExtensionAPI) {
   let rl: Interface | null = null;
   let isReady = false;
   let lastMessageFromConvos = false;
+  let headlessMode = false;
+
+  // Headless catch-up state
+  let lastSeenTimestampNs: string | null = null;
+  let ownInboxId: string | null = null;
 
   // Resolve worktree root eagerly at load time
   let worktreeRoot: string | null = null;
@@ -46,20 +60,54 @@ export default function (pi: ExtensionAPI) {
     // Not in a git repo
   }
 
+  // --- Headless env config ---
+  const convosEnvFile = process.env.CONVOS_ENV_FILE || null;
+  const convosName = process.env.CONVOS_NAME || null;
+  const convosProfileName = process.env.CONVOS_PROFILE_NAME || "Pi";
+
+  // --- Config persistence ---
+
   function getConvosConfigPath(): string | null {
+    // Headless: store alongside the env file
+    if (convosEnvFile) {
+      return join(dirname(convosEnvFile), "convos-session.json");
+    }
+    // Interactive: store in .pi/ inside worktree
     if (!worktreeRoot) return null;
     return join(worktreeRoot, ".pi", "convos.json");
   }
 
-  function loadPersistedConversation(): string | null {
+  interface PersistedState {
+    conversationId: string;
+    inviteUrl?: string | null;
+    lastSeenTimestampNs?: string | null;
+  }
+
+  function loadPersistedState(): PersistedState | null {
     const configPath = getConvosConfigPath();
     if (!configPath || !existsSync(configPath)) return null;
     try {
-      const data = JSON.parse(readFileSync(configPath, "utf-8"));
-      return data.conversationId ?? null;
+      return JSON.parse(readFileSync(configPath, "utf-8")) as PersistedState;
     } catch {
       return null;
     }
+  }
+
+  function loadPersistedConversation(): string | null {
+    return loadPersistedState()?.conversationId ?? null;
+  }
+
+  function persistState() {
+    if (!conversationId) return;
+    const configPath = getConvosConfigPath();
+    if (!configPath) return;
+    mkdirSync(dirname(configPath), { recursive: true });
+    const state: PersistedState = {
+      conversationId,
+      inviteUrl,
+      lastSeenTimestampNs,
+    };
+    writeFileSync(configPath, JSON.stringify(state, null, 2) + "\n");
   }
 
   function getDefaultConversationName(): string {
@@ -91,12 +139,85 @@ export default function (pi: ExtensionAPI) {
     return projectName;
   }
 
-  function persistConversation(convId: string, invite: string | null) {
-    const configPath = getConvosConfigPath();
-    if (!configPath) return;
-    const dir = configPath.replace(/\/[^/]+$/, "");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ conversationId: convId, inviteUrl: invite }, null, 2) + "\n");
+  // --- Headless: Convos identity init ---
+
+  function ensureConvosInit() {
+    if (!convosEnvFile) return;
+    if (existsSync(convosEnvFile)) return;
+    mkdirSync(dirname(convosEnvFile), { recursive: true });
+    execSync(`convos init --env dev --output ${convosEnvFile} --force`, {
+      encoding: "utf-8",
+      timeout: 15000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  // --- Headless: Catch-up on missed messages ---
+
+  function getOwnInboxId(): string | null {
+    if (!convosEnvFile) return null;
+    try {
+      const output = execSync(`convos identity list --env-file ${convosEnvFile} --json`, {
+        encoding: "utf-8",
+        timeout: 10000,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const identities = JSON.parse(output);
+      if (identities.length > 0) return identities[0].inboxId;
+    } catch {}
+    return null;
+  }
+
+  function catchUpOnMissedMessages() {
+    if (!conversationId || !convosEnvFile || !lastSeenTimestampNs) return;
+
+    try {
+      let cmd = `convos conversation messages ${conversationId} --sync --json --limit 50 --direction ascending --content-type text --env-file ${convosEnvFile}`;
+      cmd += ` --sent-after ${lastSeenTimestampNs}`;
+
+      const output = execSync(cmd, {
+        encoding: "utf-8",
+        timeout: 30000,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const messages = JSON.parse(output);
+      if (!messages || messages.length === 0) return;
+
+      // Get own inbox ID to filter out our messages
+      if (!ownInboxId) ownInboxId = getOwnInboxId();
+
+      const missed = messages.filter((msg: any) =>
+        msg.senderInboxId !== ownInboxId &&
+        msg.content?.text
+      );
+
+      if (missed.length === 0) return;
+
+      console.log(`\n📬 ${missed.length} missed message(s) from Convos:`);
+
+      const summary = missed.map((msg: any) => {
+        const text = msg.content?.text || msg.content;
+        console.log(`   💬 ${msg.senderInboxId}: ${text}`);
+        return `[${msg.senderInboxId}]: ${text}`;
+      }).join("\n");
+
+      // Update lastSeen to the newest message
+      const newest = messages[messages.length - 1];
+      if (newest?.sentAtNs) {
+        lastSeenTimestampNs = newest.sentAtNs;
+        persistState();
+      }
+
+      // Inject as a single steer message
+      lastMessageFromConvos = true;
+      pi.sendUserMessage(
+        `[Missed Convos messages while you were offline]:\n${summary}\n\nReview these messages. If any need a response, reply via convos_send. Then continue with your work.`,
+        { deliverAs: "steer" },
+      );
+    } catch (err) {
+      console.error("⚠ Failed to catch up on missed messages:", err);
+    }
   }
 
   // Track when a convos message triggers a turn vs terminal input
@@ -108,6 +229,17 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event) => {
     if (!isReady) return;
+
+    // In headless mode, all messages from the agent are potentially for Convos
+    if (headlessMode) {
+      if (lastMessageFromConvos) {
+        return {
+          systemPrompt: event.systemPrompt +
+            "\n\nThe current message is from a Convos user. Reply using the convos_send tool. Do NOT use markdown — Convos renders plain text only.",
+        };
+      }
+      return;
+    }
 
     if (lastMessageFromConvos) {
       return {
@@ -154,27 +286,59 @@ export default function (pi: ExtensionAPI) {
           conversationId = event.conversationId;
           qrCodePath = event.qrCodePath;
           inviteUrl = event.inviteUrl;
-          persistConversation(event.conversationId, event.inviteUrl);
-          pi.sendMessage(
-            {
+          persistState();
+
+          if (headlessMode) {
+            // Log to stdout for headless consumers
+            console.log(`\n🔗 Convos ready: ${conversationId}`);
+            if (inviteUrl) console.log(`📱 Invite: ${inviteUrl}`);
+
+            // Show QR code inline (iTerm2 protocol) if available
+            if (qrCodePath) {
+              try {
+                const imageData = readFileSync(qrCodePath);
+                const base64 = imageData.toString("base64");
+                const filename = Buffer.from(qrCodePath).toString("base64");
+                process.stdout.write(`\x1b]1337;File=name=${filename};inline=1;width=auto;preserveAspectRatio=1:${base64}\x07\n\n`);
+              } catch {}
+            }
+
+            // Catch up on missed messages from previous sessions
+            catchUpOnMissedMessages();
+
+            pi.sendMessage({
               customType: "convos",
-              content: [
-                `Convos agent is ready and listening for messages.`,
-                `Conversation: ${conversationId}`,
-                `Invite URL: ${inviteUrl}`,
-                ``,
-                `IMPORTANT: Only use convos_send/convos_react to reply to messages from Convos (prefixed with "[Convos message from ...]"). For messages from the terminal, respond normally as plain text without using convos tools.`,
-              ].join("\n"),
-              display: true,
-              details: { type: "ready", conversationId, inviteUrl, qrCodePath },
-            },
-            { triggerTurn: true },
-          );
+              content: `Convos agent is ready. Conversation: ${conversationId}. Use convos_send to message the human.`,
+              display: false,
+            }, { triggerTurn: false });
+          } else {
+            pi.sendMessage(
+              {
+                customType: "convos",
+                content: [
+                  `Convos agent is ready and listening for messages.`,
+                  `Conversation: ${conversationId}`,
+                  `Invite URL: ${inviteUrl}`,
+                  ``,
+                  `IMPORTANT: Only use convos_send/convos_react to reply to messages from Convos (prefixed with "[Convos message from ...]"). For messages from the terminal, respond normally as plain text without using convos tools.`,
+                ].join("\n"),
+                display: true,
+                details: { type: "ready", conversationId, inviteUrl, qrCodePath },
+              },
+              { triggerTurn: true },
+            );
+          }
           break;
 
         case "message":
 
           lastMessageFromConvos = true;
+
+          // Track latest message timestamp for catch-up
+          if (event.sentAtNs) {
+            lastSeenTimestampNs = event.sentAtNs;
+            persistState();
+          }
 
           // Check if this is an attachment message
           const attachMatch = event.content?.match(/^\[remote attachment: (.+?) \(.*?\) (https?:\/\/\S+)\]$/);
@@ -189,9 +353,10 @@ export default function (pi: ExtensionAPI) {
               mkdirSync(tmpDir, { recursive: true });
               const outputPath = join(tmpDir, `convos-attachment-${event.id}-${filename}`);
 
+              const downloadArgs = convosEnvFile ? ` --env-file ${convosEnvFile}` : "";
               try {
                 execSync(
-                  `convos conversation download-attachment ${conversationId} ${event.id} -o "${outputPath}"`,
+                  `convos conversation download-attachment ${conversationId} ${event.id} -o "${outputPath}"${downloadArgs}`,
                   { stdio: ["pipe", "pipe", "pipe"], timeout: 30000 },
                 );
 
@@ -199,12 +364,12 @@ export default function (pi: ExtensionAPI) {
                 const imageData = readFileSync(outputPath);
                 const base64 = imageData.toString("base64");
                 const ext = filename.split(".").pop()?.toLowerCase() ?? "jpeg";
-                const mediaType = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+                const mimeType = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
 
                 lastMessageFromConvos = true;
                 pi.sendUserMessage([
                   { type: "text", text: `[Convos image from ${event.senderInboxId}] ${filename}` },
-                  { type: "image", source: { type: "base64", mediaType, data: base64 } },
+                  { type: "image", data: base64, mimeType },
                 ], { deliverAs: "steer" });
 
                 // Clean up temp file
@@ -232,6 +397,10 @@ export default function (pi: ExtensionAPI) {
             }
           }
 
+          if (headlessMode) {
+            console.log(`\n💬 Convos message from ${event.senderInboxId}: ${event.content}`);
+          }
+
           pi.sendMessage(
             {
               customType: "convos",
@@ -251,6 +420,10 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "member_joined":
+          if (headlessMode) {
+            console.log(`\n✅ Member joined: ${event.inboxId}`);
+          }
+
           pi.sendMessage(
             {
               customType: "convos",
@@ -267,6 +440,10 @@ export default function (pi: ExtensionAPI) {
           break;
 
         case "error":
+          if (headlessMode) {
+            console.error(`\n⚠ Convos error: ${event.message}`);
+          }
+
           pi.sendMessage(
             {
               customType: "convos",
@@ -303,6 +480,11 @@ export default function (pi: ExtensionAPI) {
         const errorDetail = stderrLines.length > 0
           ? `\nStderr:\n${stderrLines.join("\n")}`
           : "";
+
+        if (headlessMode) {
+          console.error(`⚠ Convos agent exited with code ${code} before ready.${errorDetail}`);
+        }
+
         pi.sendMessage(
           {
             customType: "convos",
@@ -313,6 +495,10 @@ export default function (pi: ExtensionAPI) {
           { triggerTurn: false },
         );
       } else if (wasReady) {
+        if (headlessMode) {
+          console.log(`\n🔗 Convos agent exited (code ${code}).`);
+        }
+
         pi.sendMessage(
           {
             customType: "convos",
@@ -341,6 +527,55 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // --- Auto-start in headless mode ---
+
+  pi.on("session_start", async (_event, ctx) => {
+    if (ctx.hasUI) return; // Interactive mode uses /convos-start
+
+    headlessMode = true;
+
+    // Check that convos CLI is available
+    try {
+      execSync("which convos", { stdio: "ignore" });
+    } catch {
+      console.error("⚠ convos CLI not found. Install it: npm install -g @convos/cli");
+      return;
+    }
+
+    try {
+      // Initialize convos identity if env file is configured but doesn't exist
+      if (convosEnvFile) {
+        ensureConvosInit();
+      }
+
+      const args: string[] = [];
+
+      // Add env-file if configured
+      if (convosEnvFile) {
+        args.push("--env-file", convosEnvFile);
+      }
+
+      // Restore previous session state
+      const savedState = loadPersistedState();
+      if (savedState?.lastSeenTimestampNs) {
+        lastSeenTimestampNs = savedState.lastSeenTimestampNs;
+      }
+
+      if (savedState?.conversationId) {
+        // Resume existing conversation
+        args.push(savedState.conversationId);
+      } else {
+        // Create new conversation
+        const name = convosName || getDefaultConversationName();
+        args.push("--name", name, "--profile-name", convosProfileName);
+      }
+
+      startAgent(args);
+    } catch (err) {
+      console.error("⚠ Convos auto-start failed:", err);
+    }
+  });
+
   // --- Tools ---
 
   pi.registerTool({
@@ -357,13 +592,21 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (!stdinWriter || !isReady) {
         return {
-          content: [{ type: "text", text: "Convos agent is not running. Use /convos-start to start it." }],
+          content: [{ type: "text", text: headlessMode
+            ? "Convos agent is not running."
+            : "Convos agent is not running. Use /convos-start to start it."
+          }],
           isError: true,
         };
       }
       const cmd: any = { type: "send", text: params.text };
       if (params.replyTo) cmd.replyTo = params.replyTo;
       stdinWriter(cmd);
+
+      // Update lastSeen to now so we don't re-fetch our own messages on catch-up
+      lastSeenTimestampNs = String(Date.now() * 1_000_000);
+      persistState();
+
       return {
         content: [
           {
@@ -405,6 +648,38 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerTool({
+    name: "convos_send_file",
+    label: "Convos Send File",
+    description: "Send a file to the active Convos conversation as an attachment.",
+    parameters: Type.Object({
+      file: Type.String({ description: "Path to file to send" }),
+    }),
+    async execute(_toolCallId, params) {
+      if (!conversationId || !isReady) {
+        return {
+          content: [{ type: "text", text: "Convos agent is not running." }],
+          isError: true,
+        };
+      }
+      try {
+        const envArg = convosEnvFile ? ` --env-file ${convosEnvFile}` : "";
+        execSync(
+          `convos conversation send-attachment ${conversationId} ${params.file}${envArg}`,
+          { encoding: "utf-8", timeout: 30000, stdio: ["pipe", "pipe", "pipe"] },
+        );
+        return {
+          content: [{ type: "text", text: `File sent: ${params.file}` }],
+        };
+      } catch (err: any) {
+        return {
+          content: [{ type: "text", text: `Failed to send file: ${err.message}` }],
+          isError: true,
+        };
+      }
+    },
+  });
+
   // --- Message Renderer ---
 
   pi.registerMessageRenderer("convos", (message, _options, theme) => {
@@ -432,7 +707,7 @@ export default function (pi: ExtensionAPI) {
     return new Text(output, 0, 0);
   });
 
-  // --- Commands ---
+  // --- Commands (interactive mode only) ---
 
   pi.registerCommand("convos-start", {
     description:
@@ -469,8 +744,8 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Resuming conversation ${persistedId}...`, "info");
       } else if (!hasConversationArg) {
         // New conversation — derive name from project and branch
-        const convName = getDefaultConversationName();
-        argList.push("--name", convName, "--profile-name", "Pi");
+        const convName = convosName || getDefaultConversationName();
+        argList.push("--name", convName, "--profile-name", convosProfileName);
         ctx.ui.notify(`Starting new Convos conversation: ${convName}...`, "info");
       } else {
         ctx.ui.notify("Starting Convos agent...", "info");
@@ -518,6 +793,11 @@ export default function (pi: ExtensionAPI) {
   // --- Lifecycle ---
 
   pi.on("session_shutdown", async () => {
+    // Persist latest timestamp before shutdown
+    if (headlessMode) {
+      lastSeenTimestampNs = String(Date.now() * 1_000_000);
+      persistState();
+    }
     stopAgent();
   });
 }

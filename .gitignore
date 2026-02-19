@@ -1,2 +1,3 @@
 node_modules/
 .pi/convos.json
+.pi/convos-session.json
