@@ -19,10 +19,16 @@ Works in two modes:
 - **Messages interrupt the agent** — When a user sends a message on Convos, it arrives as a new turn
 - **`convos_send` tool** — The LLM replies by calling a tool (text or reply-to)
 - **`convos_react` tool** — The LLM reacts to messages with emoji
-- **`convos_send_file` tool** — Send file attachments to the conversation
+- **`convos_send_file` tool** — Send file attachments to the conversation (uses stdin protocol)
+- **`convos_rename` tool** — Rename the conversation
+- **`convos_update_profile` tool** — Update the agent's display name and avatar
+- **`convos_lock` / `convos_unlock` tools** — Lock or unlock the conversation to control membership
+- **`convos_explode` tool** — Permanently destroy the conversation (immediate or scheduled)
 - **Join requests auto-processed** — New members are added automatically in the background
 - **Conversation persistence** — Conversations are saved and resumed automatically
 - **Missed message catch-up** — In headless mode, messages sent while the agent was offline are fetched and injected on startup
+- **Heartbeat monitoring** — Configurable heartbeat events for health monitoring in headless mode
+- **Isolated state** — Each pi session gets its own Convos data directory (`--home`)
 
 ## Requirements
 
@@ -31,8 +37,9 @@ Works in two modes:
 
 ```bash
 npm install -g @convos/cli
-convos init
 ```
+
+> **Note:** You do _not_ need to run `convos init` manually — the extension auto-initializes on first use.
 
 ## Install
 
@@ -46,6 +53,16 @@ pi install /path/to/pi-convos
 
 > **Note:** Only install from one source. If you switch between git and local, remove the old one first with `pi remove`.
 
+## Data isolation
+
+All Convos state (identities, cryptographic keys, XMTP databases, session state) is stored in a dedicated home directory. Every `convos` CLI invocation uses `--home` to keep state isolated per pi session context.
+
+**Default location:** `<git-worktree>/.pi/convos/`
+
+This means each project/worktree gets its own Convos identity. Override with the `CONVOS_HOME` environment variable.
+
+If no git worktree is detected, falls back to `/tmp/.pi-convos`.
+
 ## Usage — Interactive Mode
 
 Start pi, then:
@@ -55,10 +72,11 @@ Start pi, then:
 ```
 
 The agent will:
-1. Create a new Convos conversation (named after your project + branch)
-2. Show a QR code invite inline
-3. Listen for messages in the background
-4. Resume the same conversation next time you start pi in this worktree
+1. Auto-initialize a Convos identity in `.pi/convos/` (first run only)
+2. Create a new Convos conversation (named after your project + branch)
+3. Show a QR code invite inline
+4. Listen for messages in the background
+5. Resume the same conversation next time you start pi in this worktree
 
 When someone joins and sends a message, the agent gets interrupted and can respond naturally. Terminal messages get terminal responses, Convos messages get Convos responses.
 
@@ -84,6 +102,12 @@ When someone joins and sends a message, the agent gets interrupted and can respo
 
 # Admin-only permissions (only creator can add members)
 /convos-start --name "Private" --permissions admin-only
+
+# With a conversation description
+/convos-start --name "Support Bot" --description "Ask me anything about the API"
+
+# With heartbeat monitoring (every 30 seconds)
+/convos-start --heartbeat 30
 ```
 
 ## Usage — Headless Mode
@@ -92,9 +116,13 @@ When pi runs without a UI (e.g. via the SDK's `createAgentSession()` + `session.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CONVOS_ENV_FILE` | Path to `.env` file for convos CLI. If set and the file doesn't exist, `convos init` is run automatically to create a new identity. | _(uses default convos config)_ |
+| `CONVOS_HOME` | Path to Convos data directory | `<worktree>/.pi/convos` |
 | `CONVOS_NAME` | Conversation name | _(derived from project + branch)_ |
+| `CONVOS_DESCRIPTION` | Conversation description | _(none)_ |
 | `CONVOS_PROFILE_NAME` | Profile name shown to members | `"Pi"` |
+| `CONVOS_PERMISSIONS` | Permission preset: `"all-members"` or `"admin-only"` | `"all-members"` |
+| `CONVOS_HEARTBEAT` | Heartbeat interval in seconds (0 to disable) | _(disabled)_ |
+| `CONVOS_LOG_LEVEL` | Log level: `off\|error\|warn\|info\|debug\|trace` | _(default)_ |
 
 ### Example: SDK integration
 
@@ -102,8 +130,9 @@ When pi runs without a UI (e.g. via the SDK's `createAgentSession()` + `session.
 import { createAgentSession, DefaultResourceLoader } from "@mariozechner/pi-coding-agent";
 
 // Configure headless Convos via env vars
-process.env.CONVOS_ENV_FILE = "/path/to/agent/.convos/.env";
+process.env.CONVOS_HOME = "/path/to/agent/.convos";
 process.env.CONVOS_NAME = "My Agent";
+process.env.CONVOS_HEARTBEAT = "30";
 
 const resourceLoader = new DefaultResourceLoader({
   cwd: process.cwd(),
@@ -126,11 +155,12 @@ await session.prompt("Check for messages and start working.");
 ### Headless features
 
 - **Auto-start** — Convos agent starts automatically when `ctx.hasUI` is false
-- **Auto-init** — If `CONVOS_ENV_FILE` is set but doesn't exist, a new identity is created
+- **Auto-init** — If the Convos home directory doesn't have a `.env`, `convos init` is run automatically
 - **Missed message catch-up** — On startup, fetches messages sent after the last seen timestamp and injects them as a steer message
 - **Session persistence** — Conversation ID and last-seen timestamp persist across restarts
 - **QR code output** — Prints QR code via iTerm2 inline image protocol for terminal consumers
 - **Console logging** — Messages, joins, and errors are logged to stdout/stderr
+- **Heartbeat logging** — When `CONVOS_HEARTBEAT` is set, periodic health checks are logged
 
 ## Tools (available to the LLM)
 
@@ -138,7 +168,12 @@ await session.prompt("Check for messages and start working.");
 |------|-------------|
 | `convos_send` | Send a text message (with optional `replyTo`) |
 | `convos_react` | React to a message with an emoji |
-| `convos_send_file` | Send a file attachment |
+| `convos_send_file` | Send a file attachment (with optional `replyTo`) |
+| `convos_rename` | Rename the conversation |
+| `convos_update_profile` | Update display name and/or avatar image |
+| `convos_lock` | Lock the conversation (prevent new joins, invalidate invites) |
+| `convos_unlock` | Unlock the conversation (allow new joins) |
+| `convos_explode` | Permanently destroy the conversation (immediate or scheduled) |
 
 ## How it works
 
@@ -152,13 +187,19 @@ await session.prompt("Check for messages and start working.");
 │  ├─ convos_send tool                │
 │  ├─ convos_react tool               │
 │  ├─ convos_send_file tool           │
+│  ├─ convos_rename tool              │
+│  ├─ convos_update_profile tool      │
+│  ├─ convos_lock / convos_unlock     │
+│  ├─ convos_explode tool             │
 │  └─ background event listener ──────┼──── pi.sendMessage()
 │       (reads child stdout)          │     triggers new turn
 │                                     │
 │  ┌───────────────────────────────┐  │
 │  │  convos agent serve (child)   │  │
+│  │  --home .pi/convos/           │  │
 │  │  ├─ XMTP message stream      │  │
 │  │  ├─ Join request stream       │  │
+│  │  ├─ Heartbeat emitter         │  │
 │  │  └─ stdin command reader      │  │
 │  └───────────────────────────────┘  │
 └─────────────────────────────────────┘

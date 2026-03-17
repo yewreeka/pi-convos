@@ -7,17 +7,26 @@
  * How it works:
  * - Spawns `convos agent serve` as a child process
  * - Streams incoming messages and injects them via pi.sendMessage()
- * - Registers `convos_send` and `convos_react` tools for the LLM to reply
+ * - Registers tools for the LLM to send messages, react, attach files, etc.
  * - Messages from Convos users interrupt the agent as new turns
+ *
+ * Data isolation:
+ *   All Convos state (identities, keys, databases) is stored in a dedicated
+ *   home directory — one per pi session context. By default this is
+ *   `.pi/convos/` inside the git worktree root. Override with CONVOS_HOME.
  *
  * Modes:
  *   Interactive (TUI) — user starts with /convos-start command
  *   Headless — auto-starts on session_start when no UI is available
  *
- * Headless mode is configured via environment variables:
- *   CONVOS_ENV_FILE     — Path to .env file for convos CLI (auto-created if missing)
+ * Environment variables:
+ *   CONVOS_HOME         — Path to Convos data directory (default: <worktree>/.pi/convos)
  *   CONVOS_NAME         — Conversation name (default: derived from project/branch)
+ *   CONVOS_DESCRIPTION  — Conversation description
  *   CONVOS_PROFILE_NAME — Profile name shown to other members (default: "Pi")
+ *   CONVOS_PERMISSIONS  — Permission preset: "all-members" or "admin-only"
+ *   CONVOS_HEARTBEAT    — Heartbeat interval in seconds (0 to disable)
+ *   CONVOS_LOG_LEVEL    — Log level: off|error|warn|info|debug|trace
  *
  * Commands (interactive only):
  *   /convos-start [args]  — Start the agent (args passed to `convos agent serve`)
@@ -30,7 +39,7 @@
 import { spawn, type ChildProcess, execSync } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -60,21 +69,39 @@ export default function (pi: ExtensionAPI) {
     // Not in a git repo
   }
 
-  // --- Headless env config ---
-  const convosEnvFile = process.env.CONVOS_ENV_FILE || null;
+  // --- Config ---
   const convosName = process.env.CONVOS_NAME || null;
+  const convosDescription = process.env.CONVOS_DESCRIPTION || null;
   const convosProfileName = process.env.CONVOS_PROFILE_NAME || "Pi";
+  const convosPermissions = process.env.CONVOS_PERMISSIONS || null;
+  const convosHeartbeat = process.env.CONVOS_HEARTBEAT || null;
+  const convosLogLevel = process.env.CONVOS_LOG_LEVEL || null;
+
+  // --- Convos home directory ---
+  // Every CLI invocation uses --home to isolate state per pi session.
+  // Default: <worktree>/.pi/convos/ (or /tmp/.pi-convos if no worktree)
+  function getConvosHome(): string {
+    if (process.env.CONVOS_HOME) return process.env.CONVOS_HOME;
+    if (worktreeRoot) return join(worktreeRoot, ".pi", "convos");
+    return join("/tmp", ".pi-convos");
+  }
+
+  // --- Helper: build --home arg for all CLI invocations ---
+  function homeArgs(): string[] {
+    return ["--home", getConvosHome()];
+  }
+
+  // --- Helper: not-running error message ---
+  function notRunningError(): string {
+    return headlessMode
+      ? "Convos agent is not running."
+      : "Convos agent is not running. Use /convos-start to start it.";
+  }
 
   // --- Config persistence ---
 
-  function getConvosConfigPath(): string | null {
-    // Headless: store alongside the env file
-    if (convosEnvFile) {
-      return join(dirname(convosEnvFile), "convos-session.json");
-    }
-    // Interactive: store in .pi/ inside worktree
-    if (!worktreeRoot) return null;
-    return join(worktreeRoot, ".pi", "convos.json");
+  function getConvosConfigPath(): string {
+    return join(getConvosHome(), "convos-session.json");
   }
 
   interface PersistedState {
@@ -85,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 
   function loadPersistedState(): PersistedState | null {
     const configPath = getConvosConfigPath();
-    if (!configPath || !existsSync(configPath)) return null;
+    if (!existsSync(configPath)) return null;
     try {
       return JSON.parse(readFileSync(configPath, "utf-8")) as PersistedState;
     } catch {
@@ -100,8 +127,7 @@ export default function (pi: ExtensionAPI) {
   function persistState() {
     if (!conversationId) return;
     const configPath = getConvosConfigPath();
-    if (!configPath) return;
-    mkdirSync(dirname(configPath), { recursive: true });
+    mkdirSync(getConvosHome(), { recursive: true });
     const state: PersistedState = {
       conversationId,
       inviteUrl,
@@ -139,25 +165,26 @@ export default function (pi: ExtensionAPI) {
     return projectName;
   }
 
-  // --- Headless: Convos identity init ---
+  // --- Convos identity init ---
 
   function ensureConvosInit() {
-    if (!convosEnvFile) return;
-    if (existsSync(convosEnvFile)) return;
-    mkdirSync(dirname(convosEnvFile), { recursive: true });
-    execSync(`convos init --env dev --output ${convosEnvFile} --force`, {
+    const home = getConvosHome();
+    // Check if already initialized (has a .env file)
+    if (existsSync(join(home, ".env"))) return;
+    mkdirSync(home, { recursive: true });
+    execSync(`convos init --home ${home} --env dev --force`, {
       encoding: "utf-8",
       timeout: 15000,
       stdio: ["pipe", "pipe", "pipe"],
     });
   }
 
-  // --- Headless: Catch-up on missed messages ---
+  // --- Catch-up on missed messages ---
 
   function getOwnInboxId(): string | null {
-    if (!convosEnvFile) return null;
     try {
-      const output = execSync(`convos identity list --env-file ${convosEnvFile} --json`, {
+      const args = homeArgs();
+      const output = execSync(`convos identity list ${args.join(" ")} --json`, {
         encoding: "utf-8",
         timeout: 10000,
         stdio: ["pipe", "pipe", "pipe"],
@@ -169,10 +196,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function catchUpOnMissedMessages() {
-    if (!conversationId || !convosEnvFile || !lastSeenTimestampNs) return;
+    if (!conversationId || !lastSeenTimestampNs) return;
 
     try {
-      let cmd = `convos conversation messages ${conversationId} --sync --json --limit 50 --direction ascending --content-type text --env-file ${convosEnvFile}`;
+      const hArgs = homeArgs().join(" ");
+      let cmd = `convos conversation messages ${conversationId} --sync --json --limit 50 --direction ascending --content-type text ${hArgs}`;
       cmd += ` --sent-after ${lastSeenTimestampNs}`;
 
       const output = execSync(cmd, {
@@ -230,23 +258,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event) => {
     if (!isReady) return;
 
-    // In headless mode, all messages from the agent are potentially for Convos
-    if (headlessMode) {
-      if (lastMessageFromConvos) {
-        return {
-          systemPrompt: event.systemPrompt +
-            "\n\nThe current message is from a Convos user. Reply using the convos_send tool. Do NOT use markdown — Convos renders plain text only.",
-        };
-      }
-      return;
-    }
-
     if (lastMessageFromConvos) {
       return {
         systemPrompt: event.systemPrompt +
           "\n\nThe current message is from a Convos user. Reply using the convos_send tool. Do NOT use markdown — Convos renders plain text only.",
       };
-    } else {
+    } else if (!headlessMode) {
       return {
         systemPrompt: event.systemPrompt +
           "\n\nThe current message is from the terminal. Respond normally as plain text output. Do NOT use convos_send or convos_react — those are only for Convos messages.",
@@ -353,10 +370,10 @@ export default function (pi: ExtensionAPI) {
               mkdirSync(tmpDir, { recursive: true });
               const outputPath = join(tmpDir, `convos-attachment-${event.id}-${filename}`);
 
-              const downloadArgs = convosEnvFile ? ` --env-file ${convosEnvFile}` : "";
+              const hArgs = homeArgs().join(" ");
               try {
                 execSync(
-                  `convos conversation download-attachment ${conversationId} ${event.id} -o "${outputPath}"${downloadArgs}`,
+                  `convos conversation download-attachment ${conversationId} ${event.id} -o "${outputPath}" ${hArgs}`,
                   { stdio: ["pipe", "pipe", "pipe"], timeout: 30000 },
                 );
 
@@ -437,6 +454,13 @@ export default function (pi: ExtensionAPI) {
 
         case "sent":
           // Delivery confirmation — no need to trigger a turn
+          break;
+
+        case "heartbeat":
+          // Periodic health check — log in headless mode for monitoring
+          if (headlessMode) {
+            console.log(`💓 Heartbeat: ${event.timestamp || new Date().toISOString()}`);
+          }
           break;
 
         case "error":
@@ -543,16 +567,19 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      // Initialize convos identity if env file is configured but doesn't exist
-      if (convosEnvFile) {
-        ensureConvosInit();
+      // Initialize convos home if not already set up
+      ensureConvosInit();
+
+      const args: string[] = [...homeArgs()];
+
+      // Add --heartbeat if configured
+      if (convosHeartbeat) {
+        args.push("--heartbeat", convosHeartbeat);
       }
 
-      const args: string[] = [];
-
-      // Add env-file if configured
-      if (convosEnvFile) {
-        args.push("--env-file", convosEnvFile);
+      // Add --log-level if configured
+      if (convosLogLevel) {
+        args.push("--log-level", convosLogLevel);
       }
 
       // Restore previous session state
@@ -568,6 +595,13 @@ export default function (pi: ExtensionAPI) {
         // Create new conversation
         const name = convosName || getDefaultConversationName();
         args.push("--name", name, "--profile-name", convosProfileName);
+
+        if (convosDescription) {
+          args.push("--description", convosDescription);
+        }
+        if (convosPermissions) {
+          args.push("--permissions", convosPermissions);
+        }
       }
 
       startAgent(args);
@@ -592,10 +626,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (!stdinWriter || !isReady) {
         return {
-          content: [{ type: "text", text: headlessMode
-            ? "Convos agent is not running."
-            : "Convos agent is not running. Use /convos-start to start it."
-          }],
+          content: [{ type: "text", text: notRunningError() }],
           isError: true,
         };
       }
@@ -635,7 +666,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (!stdinWriter || !isReady) {
         return {
-          content: [{ type: "text", text: "Convos agent is not running." }],
+          content: [{ type: "text", text: notRunningError() }],
           isError: true,
         };
       }
@@ -654,29 +685,151 @@ export default function (pi: ExtensionAPI) {
     description: "Send a file to the active Convos conversation as an attachment.",
     parameters: Type.Object({
       file: Type.String({ description: "Path to file to send" }),
+      replyTo: Type.Optional(
+        Type.String({ description: "Message ID to reply to (optional)" }),
+      ),
     }),
     async execute(_toolCallId, params) {
-      if (!conversationId || !isReady) {
+      if (!stdinWriter || !isReady) {
         return {
-          content: [{ type: "text", text: "Convos agent is not running." }],
+          content: [{ type: "text", text: notRunningError() }],
           isError: true,
         };
       }
-      try {
-        const envArg = convosEnvFile ? ` --env-file ${convosEnvFile}` : "";
-        execSync(
-          `convos conversation send-attachment ${conversationId} ${params.file}${envArg}`,
-          { encoding: "utf-8", timeout: 30000, stdio: ["pipe", "pipe", "pipe"] },
-        );
+      const cmd: any = { type: "attach", file: params.file };
+      if (params.replyTo) cmd.replyTo = params.replyTo;
+      stdinWriter(cmd);
+      return {
+        content: [{ type: "text", text: `File attachment sent: ${params.file}${params.replyTo ? ` (reply to ${params.replyTo})` : ""}` }],
+        details: { file: params.file, replyTo: params.replyTo },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "convos_rename",
+    label: "Convos Rename",
+    description: "Rename the active Convos conversation. Visible to all members.",
+    parameters: Type.Object({
+      name: Type.String({ description: "The new conversation name" }),
+    }),
+    async execute(_toolCallId, params) {
+      if (!stdinWriter || !isReady) {
         return {
-          content: [{ type: "text", text: `File sent: ${params.file}` }],
-        };
-      } catch (err: any) {
-        return {
-          content: [{ type: "text", text: `Failed to send file: ${err.message}` }],
+          content: [{ type: "text", text: notRunningError() }],
           isError: true,
         };
       }
+      stdinWriter({ type: "rename", name: params.name });
+      return {
+        content: [{ type: "text", text: `Conversation renamed to: "${params.name}"` }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "convos_update_profile",
+    label: "Convos Update Profile",
+    description: "Update the agent's display name and/or avatar image in the conversation.",
+    parameters: Type.Object({
+      name: Type.Optional(
+        Type.String({ description: "New display name (empty string to clear)" }),
+      ),
+      image: Type.Optional(
+        Type.String({ description: "Avatar image URL (empty string to clear)" }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      if (!stdinWriter || !isReady) {
+        return {
+          content: [{ type: "text", text: notRunningError() }],
+          isError: true,
+        };
+      }
+      if (params.name === undefined && params.image === undefined) {
+        return {
+          content: [{ type: "text", text: "Must provide at least one of: name, image" }],
+          isError: true,
+        };
+      }
+      const cmd: any = { type: "update-profile" };
+      if (params.name !== undefined) cmd.name = params.name;
+      if (params.image !== undefined) cmd.image = params.image;
+      stdinWriter(cmd);
+
+      const parts: string[] = [];
+      if (params.name !== undefined) parts.push(`name: "${params.name}"`);
+      if (params.image !== undefined) parts.push(`image: "${params.image}"`);
+      return {
+        content: [{ type: "text", text: `Profile updated: ${parts.join(", ")}` }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "convos_lock",
+    label: "Convos Lock",
+    description: "Lock the conversation to prevent new members from joining. Invalidates all existing invites.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      if (!stdinWriter || !isReady) {
+        return {
+          content: [{ type: "text", text: notRunningError() }],
+          isError: true,
+        };
+      }
+      stdinWriter({ type: "lock" });
+      return {
+        content: [{ type: "text", text: "Conversation locked — no new members can join." }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "convos_unlock",
+    label: "Convos Unlock",
+    description: "Unlock the conversation to allow new members to join. Previously shared invites remain invalid — generate new ones after unlocking.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params) {
+      if (!stdinWriter || !isReady) {
+        return {
+          content: [{ type: "text", text: notRunningError() }],
+          isError: true,
+        };
+      }
+      stdinWriter({ type: "unlock" });
+      return {
+        content: [{ type: "text", text: "Conversation unlocked — new members can join." }],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "convos_explode",
+    label: "Convos Explode",
+    description: "Permanently destroy the conversation. This is irreversible — all members are removed, cryptographic keys are deleted, and message history cannot be recovered. Use with extreme caution.",
+    parameters: Type.Object({
+      scheduled: Type.Optional(
+        Type.String({ description: "Schedule explosion for a future date (ISO8601 format, e.g. '2025-03-01T00:00:00Z'). If omitted, explodes immediately." }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      if (!stdinWriter || !isReady) {
+        return {
+          content: [{ type: "text", text: notRunningError() }],
+          isError: true,
+        };
+      }
+      const cmd: any = { type: "explode" };
+      if (params.scheduled) cmd.scheduled = params.scheduled;
+      stdinWriter(cmd);
+
+      const msg = params.scheduled
+        ? `Conversation explosion scheduled for ${params.scheduled}.`
+        : "Conversation exploded — permanently destroyed.";
+      return {
+        content: [{ type: "text", text: msg }],
+      };
     },
   });
 
@@ -730,17 +883,26 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const argList = args
+      // Ensure convos home is initialized
+      ensureConvosInit();
+
+      // Parse user-provided args
+      const userArgs = args
         ? args.match(/"[^"]*"|\S+/g)?.map((a) => a.replace(/^"|"$/g, "")) ?? []
         : [];
 
-      // If no conversation ID provided as argument, try to reuse persisted one
-      const hasConversationArg = argList.some((a) => !a.startsWith("-"));
+      // Build final arg list: always include --home
+      const argList = [...homeArgs(), ...userArgs];
+
+      // Check if user passed a bare arg (conversation ID) — bare = not a flag and not a flag value
+      const hasConversationArg = userArgs.some((a, i) =>
+        !a.startsWith("-") && (i === 0 || !userArgs[i - 1]?.startsWith("--"))
+      );
       const persistedId = loadPersistedConversation();
 
       if (!hasConversationArg && persistedId) {
         // Attach to existing conversation
-        argList.unshift(persistedId);
+        argList.push(persistedId);
         ctx.ui.notify(`Resuming conversation ${persistedId}...`, "info");
       } else if (!hasConversationArg) {
         // New conversation — derive name from project and branch
